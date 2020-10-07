@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: MIT
 pragma solidity 0.6.12;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20Capped.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-
 
 // CologneToken with minting by owner only
 contract CologneToken is ERC20Capped, Ownable {
