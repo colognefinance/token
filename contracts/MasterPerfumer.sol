@@ -110,8 +110,8 @@ contract MasterPerfumer is Ownable {
         phase3StartBlock = _phase3startBlock;
         minElapsedBlocksBeforePhaseStart = _minElapsedBlocksBeforePhaseStart;
         require(block.number + _minElapsedBlocksBeforePhaseStart < phase1StartBlock, "not enough notice given");
-        require(phase1StartBlock + _phase1DurationInBlocks <= phase2StartBlock, "phases 1 & 2 would overlap");
-        require(phase2StartBlock + _phase2DurationInBlocks <= phase3StartBlock, "phases 2 & 3 would overlap");
+        require(phase1StartBlock + _phase1DurationInBlocks <= phase2StartBlock, "phases 1 & 2 overlap or wrong order");
+        require(phase2StartBlock + _phase2DurationInBlocks <= phase3StartBlock, "phases 2 & 3 overlap or wrong order");
 
         emit Schedule(_colognePerBlock,
                         _phase1DurationInBlocks,
@@ -146,8 +146,8 @@ contract MasterPerfumer is Ownable {
             require(false, "setStartBlock: invalid phase, or phase already started");
         }
 
-        require(phase1StartBlock + phase1DurationInBlocks <= phase2StartBlock, "phases 1 & 2 would overlap");
-        require(phase2StartBlock + phase2DurationInBlocks <= phase3StartBlock, "phases 2 & 3 would overlap");
+        require(phase1StartBlock + phase1DurationInBlocks <= phase2StartBlock, "phases 1 & 2 overlap or wrong order");
+        require(phase2StartBlock + phase2DurationInBlocks <= phase3StartBlock, "phases 2 & 3 overlap or wrong order");
 
         emit Schedule(colognePerBlock,
                 phase1DurationInBlocks,

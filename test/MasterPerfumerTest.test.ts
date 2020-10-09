@@ -11,6 +11,16 @@ const {deployContract, provider, solidity} = waffle;
 const { Contract, BigNumber } = ethers;
 const { parseEther } = ethers.utils;
 
+const HARD_CAP = parseEther("100000000");
+const CLGN_PER_BLOCK = parseEther("500");
+const PHASE_1_DURATION = 46;
+const PHASE_2_DURATION = 46;
+const PHASE_3_DURATION = 56;
+const MIN_ELAPSED_BLOCKS_BEFORE_START = 10;
+const START_PHASE1_BLOCK_OFFSET = 100;
+const START_PHASE2_BLOCK_OFFSET = 200;
+const START_PHASE3_BLOCK_OFFSET = 300;
+
 // use(solidity);
 
 // Advance 1 block and 13s of time
@@ -27,6 +37,7 @@ async function advanceBlockTo (target: number) {
     const start = Date.now();
     let notified;
     if (target < currentBlock) throw Error(`Target block #(${target}) is lower than current block #(${currentBlock})`);
+    if (target === currentBlock) throw Error(`Target block #(${target}) is equal to current block #(${currentBlock})`);
     while ((await ethers.provider.getBlockNumber()) < target) {
         if (!notified && Date.now() - start >= 5000) {
         notified = true;
@@ -42,29 +53,30 @@ describe('MasterPerfumer', () => {
     let perfumer: MasterPerfumer;
     let LP1: MockErc20;
     let LP2: MockErc20;
-    const HARD_CAP = parseEther("100000000");
-    const CLGN_PER_BLOCK = parseEther("500");
-    const PHASE_1_DURATION = 46;
-    const PHASE_2_DURATION = 46;
-    const PHASE_3_DURATION = 56;
-    const MIN_ELAPSED_BLOCKS_BEFORE_START = 10;
-    const START_PHASE1 = 100;
-    const START_PHASE2 = 200;
-    const START_PHASE3 = 300;
+
+    // We vary the phase start blocks throughout our tests, because the block number gets bigger with every test
+    let startPhase1Block: number;
+    let startPhase2Block: number;
+    let startPhase3Block: number;
 
 
     beforeEach(async () => {
-        cologne = (await deployContract(alice, CologneTokenArtifact, [HARD_CAP])) as unknown as CologneToken;
-        perfumer = (await deployContract(alice, MasterPerfumerArtifact,
+        const currentBlock = (await ethers.provider.getBlockNumber());
+        startPhase1Block = currentBlock + START_PHASE1_BLOCK_OFFSET;
+        startPhase2Block = currentBlock + START_PHASE2_BLOCK_OFFSET;
+        startPhase3Block = currentBlock + START_PHASE3_BLOCK_OFFSET;
+
+        cologne = (await deployContract(minter, CologneTokenArtifact, [HARD_CAP])) as unknown as CologneToken;
+        perfumer = (await deployContract(minter, MasterPerfumerArtifact,
             [cologne.address,
              CLGN_PER_BLOCK,
              PHASE_1_DURATION,
              PHASE_2_DURATION,
              PHASE_3_DURATION,
              MIN_ELAPSED_BLOCKS_BEFORE_START,
-             START_PHASE1,
-             START_PHASE2,
-             START_PHASE3])) as unknown as MasterPerfumer;        
+             startPhase1Block,
+             startPhase2Block,
+             startPhase3Block])) as unknown as MasterPerfumer;        
         await expect(cologne.transferOwnership(perfumer.address)).to.emit(cologne, 'OwnershipTransferred')
     });
 
@@ -76,59 +88,69 @@ describe('MasterPerfumer', () => {
         expect(await perfumer.phase2DurationInBlocks()).to.equal(PHASE_2_DURATION);
         expect(await perfumer.phase3DurationInBlocks()).to.equal(PHASE_3_DURATION);
         expect(await perfumer.minElapsedBlocksBeforePhaseStart()).to.equal(MIN_ELAPSED_BLOCKS_BEFORE_START);
-        expect(await perfumer.phase1StartBlock()).to.equal(START_PHASE1);
-        expect(await perfumer.phase2StartBlock()).to.equal(START_PHASE2);
-        expect(await perfumer.phase3StartBlock()).to.equal(START_PHASE3);
+        expect(await perfumer.phase1StartBlock()).to.equal(startPhase1Block);
+        expect(await perfumer.phase2StartBlock()).to.equal(startPhase2Block);
+        expect(await perfumer.phase3StartBlock()).to.equal(startPhase3Block);
     });
 
     it('should allow phase schedule updates', async () => {
-        await expect(perfumer.setStartBlock(1, 150)).to.emit(perfumer, "Schedule");
-        await expect(perfumer.setStartBlock(3, 350)).to.emit(perfumer, "Schedule");
-        await expect(perfumer.setStartBlock(2, 303)).to.emit(perfumer, "Schedule");
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 50)).to.emit(perfumer, "Schedule");
+        await expect(perfumer.setStartBlock(3, startPhase3Block + 50)).to.emit(perfumer, "Schedule");
+        await expect(perfumer.setStartBlock(2, startPhase3Block + 3)).to.emit(perfumer, "Schedule");
     });
     
     it('should reject overlapping phases', async () => {
-        await expect(perfumer.setStartBlock(1, 160)).to.be.revertedWith("phases 1 & 2 would overlap");
-        await expect(perfumer.setStartBlock(3, 240)).to.be.revertedWith("phases 2 & 3 would overlap");
-        await expect(perfumer.setStartBlock(2, 255)).to.be.revertedWith("phases 2 & 3 would overlap");
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 60)).to.be.revertedWith("phases 1 & 2 overlap or wrong order");
+        await expect(perfumer.setStartBlock(3, startPhase2Block + 40)).to.be.revertedWith("phases 2 & 3 overlap or wrong order");
+        await expect(perfumer.setStartBlock(2, startPhase2Block + 55)).to.be.revertedWith("phases 2 & 3 overlap or wrong order");
+        await expect(perfumer.setStartBlock(3, startPhase2Block)).to.be.revertedWith("phases 2 & 3 overlap or wrong order");
+        await expect(perfumer.setStartBlock(3, startPhase2Block + 45)).to.be.revertedWith("phases 2 & 3 overlap or wrong order");
     });
 
-    it.skip('should reject out of order phases', async () => {
-        //TODO
+    it('should reject out of order phases', async () => {
+        await expect(perfumer.setStartBlock(1, startPhase3Block + 100)).to.be.revertedWith("phases 1 & 2 overlap or wrong order");
+        await expect(perfumer.setStartBlock(2, startPhase1Block - 50)).to.be.revertedWith("phases 1 & 2 overlap or wrong order");
+        await expect(perfumer.setStartBlock(3, startPhase2Block - 1)).to.be.revertedWith("phases 2 & 3 overlap or wrong order");
     });
 
-    // TODO: skipping this test because and others involving "time travel" we can't advance the block number without breaking subsequent tests
-    // Options:
-    //   - use waffle's fixings if they backup/restore the block number
-    //   - or split into separate test scripts if we can force a new bevm instance for each
-    //   - if all else fails, adjust block numbers specified in subsequent tests, ideally dynamically based on block at start of test
-    it.skip('should reject phases in the past or too soon', async () => {
-        await expect(perfumer.setStartBlock(1, 150)).to.emit(perfumer, "Schedule");
-        await advanceBlockTo(142);
-        await expect(perfumer.setStartBlock(1, 140)).to.be.revertedWith("setStartBlock: not enough notice given");
-        await expect(perfumer.setStartBlock(1, 151)).to.be.revertedWith("setStartBlock: not enough notice given");
+    it('should reject phases in the past', async () => {
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 50)).to.emit(perfumer, "Schedule");
+        await advanceBlockTo(startPhase1Block + 42);
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 40)).to.be.revertedWith("setStartBlock: not enough notice given");
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 41)).to.be.revertedWith("setStartBlock: not enough notice given");
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 42)).to.be.revertedWith("setStartBlock: not enough notice given");
+        await expect(perfumer.setStartBlock(3, startPhase1Block + 20)).to.be.revertedWith("setStartBlock: not enough notice given");
     });
 
-
-    // TODO: more tests of phase start block updates?
+    it('should reject phases that start too soon', async () => {
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 50)).to.emit(perfumer, "Schedule");
+        await advanceBlockTo(startPhase1Block + 42);
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 51)).to.be.revertedWith("setStartBlock: not enough notice given");
+        await expect(perfumer.setStartBlock(1, startPhase1Block + 52)).to.be.revertedWith("setStartBlock: not enough notice given");
+    });
 
     context('With LP tokens', () => {
         beforeEach(async () => {
             // LP Token 1: a, b & c have 1000 each, all approved to perfumer
             // LP Token 2: a, b & c have 1000 each, with 1000, 500 and 0 approved to perfumer respectively
-            LP1 = (await deployContract(alice, MockERC20Artifact, ["LP Token 1", "LP1", HARD_CAP])) as unknown as MockErc20;            
+            LP1 = (await deployContract(minter, MockERC20Artifact, ["LP Token 1", "LP1", HARD_CAP])) as unknown as MockErc20;            
             await LP1.transfer(alice.address, '1000');
             await LP1.connect(alice).approve(perfumer.address, '1000');
             await LP1.transfer(bob.address, '1000');
             await LP1.connect(bob).approve(perfumer.address, '1000');
             await LP1.transfer(carol.address, '1000');
             await LP1.connect(carol).approve(perfumer.address, '1000');
-            LP2 = (await deployContract(alice, MockERC20Artifact, ["LP Token 2", "LP2", HARD_CAP])) as unknown as MockErc20;
+            LP2 = (await deployContract(minter, MockERC20Artifact, ["LP Token 2", "LP2", HARD_CAP])) as unknown as MockErc20;
             await LP2.transfer(alice.address, '1000');
             await LP2.connect(alice).approve(perfumer.address, '1000');
             await LP2.transfer(bob.address, '1000');
             await LP2.connect(bob).approve(perfumer.address, '500');
             await LP2.transfer(carol.address, '1000');
+        });
+
+        it('A & B should have expected balances', async () => {
+            expect(await LP1.balanceOf(alice.address)).to.equal(1000);
+            expect(await LP2.balanceOf(bob.address)).to.equal(1000);
         });
 
         it('should update state as LP token entries are added', async () => {
@@ -145,7 +167,7 @@ describe('MasterPerfumer', () => {
             await expect(perfumer.add('100', LP1.address, true)).to.be.revertedWith("add: duplicate token");
         });
 
-        context('With Alice and Bob both staking equal shares', () => {
+        context('With equal pool weights (Alice and Bob start with a pool to themselves)', () => {
             beforeEach(async () => {
                 // LP Token 1: a staking 100
                 // LP Token 2: b staking 200
@@ -156,46 +178,51 @@ describe('MasterPerfumer', () => {
                 await perfumer.connect(bob).deposit(1, 200);
             });
 
-            it('should reward all stakers when stakes are "equal"', async () => {
+            it('should start with correct balances and totalSupplies', async () => {
+                expect(await LP1.balanceOf(alice.address)).to.equal(900);
+                expect(await LP2.balanceOf(bob.address)).to.equal(800);
+                expect(await LP1.balanceOf(perfumer.address)).to.equal(100);
+                expect(await LP2.balanceOf(perfumer.address)).to.equal(200);
+            });
+
+            it('should reward all stakers equally when they have a pool each', async () => {
                 // Start at 0
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
 
-                await advanceBlockTo(100);
+                await advanceBlockTo(startPhase1Block);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
 
-                await advanceBlockTo(101);
+                await advanceBlockTo(startPhase1Block + 1);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("250"));
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("250"));
 
-                await advanceBlockTo(146);
+                await advanceBlockTo(startPhase1Block + 46);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11500")); // 46 * 250
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("11500")); // 46 * 250
 
-                await advanceBlockTo(147);
+                await advanceBlockTo(startPhase1Block + 47);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11500")); // 46 * 250
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("11500")); // 46 * 250
 
-                //TODO: more intermediate steps, including withdrawals
-
-                await advanceBlockTo(200);
+                await advanceBlockTo(startPhase2Block);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11500")); // 46 * 250
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("11500")); // 46 * 250
 
-                await advanceBlockTo(201);
+                await advanceBlockTo(startPhase2Block + 1);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(0);
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11750")); // 47 * 250
@@ -204,30 +231,261 @@ describe('MasterPerfumer', () => {
                 // Cannot withdraw more than owed
                 await expect(perfumer.connect(bob).withdraw(1, 201)).to.revertedWith("withdraw: not good"); // 47 * 250
 
-                // Now withdraw all but 1
+                // Now B withdraws all but 1
                 await expect(perfumer.connect(bob).withdraw(1, 199)).to.emit(perfumer, "Withdraw");
                 expect(await cologne.balanceOf(bob.address)).to.equal(parseEther("12000")); // received 48 * 250
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("0")); // 0 remaining
 
-                await advanceBlockTo(360);
+                await advanceBlockTo(startPhase3Block + 60);
                 expect(await cologne.balanceOf(alice.address)).to.equal(0);
                 expect(await cologne.balanceOf(bob.address)).to.equal(parseEther("12000"));
                 expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("37000")); // (46+46+56) * 250
                 expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("25000")); // (44+56) * 250
             });
-        });
-    
-        it.skip('should reward all stakers in proportion when their when stakes are not equal', async () => {
-            //TODO
+
+            it('should reward all stakers appropriately when stakes change and pools become shared', async () => {
+                // Start at 0
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+
+                await advanceBlockTo(startPhase1Block);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+
+                await advanceBlockTo(startPhase1Block + 1);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("250"));
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("250"));
+
+                // Now A deposits 50 of LP Token 2, taking 20% of LP2's allocation for the next 44 blocks
+                // (The previous allocation counts for two blocks, not just one.)
+                await perfumer.connect(alice).deposit(1, 50);
+                await advanceBlockTo(startPhase1Block + 3);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("750")); // 250*3blocks
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("50")); // 50*1block
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("700")); // 250*2blocs + 200 * 1block
+
+                await advanceBlockTo(startPhase1Block + 46);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11500")); // 46 * 250
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("2200")); // 44 * 50
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("9300")); // 500 + 44 * 200
+
+                // Values unchanged at next block because no phase active
+                await advanceBlockTo(startPhase1Block + 47);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11500")); // 46 * 250
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("2200")); // 44 * 50
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("9300")); // 500 + 44 * 200
+
+                // Now A deposits another 250 of LP Token 2, taking 60% of LP2's allocation going forward
+                // This should also trigger a withdrawal of the CLGN owed for LP2 tokens (but not LP1 tokens)
+                await perfumer.connect(alice).deposit(1, 250);
+                await advanceBlockTo(startPhase2Block + 1);
+                expect(await cologne.balanceOf(alice.address)).to.equal(parseEther("2200"));
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("11750")); // 47 * 250
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("150")); // 150*1block
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("9400")); // Above + 100*1block
+
+                // Now A withdraws all but 1 from pool A, and all from pool B
+                // A keeps all of LP1 allocation, and B gets all LP2 allocation
+                // B withdras some from pool B but as he is the only staker the only effect is to receive his CLGN
+                // These three withdrawals happen in 3 separate blocks in the Buidler EVM, so the math gets fiddly
+                await expect(perfumer.connect(alice).withdraw(0, 99)).to.emit(perfumer, "Withdraw"); // Earns 12000
+                await expect(perfumer.connect(alice).withdraw(1, 300)).to.emit(perfumer, "Withdraw"); // Earns 450 (150*3 blocks)
+                await expect(perfumer.connect(bob).withdraw(1, 199)).to.emit(perfumer, "Withdraw"); // Earns 9700 (9400 above + 3 blocks * 100)
+                expect(await cologne.balanceOf(alice.address)).to.equal(parseEther("14650")); // 2200 + 1200 + 450
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("500")); // 2 blocks * 250
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("0")); // 1 block * 0
+                expect(await cologne.balanceOf(bob.address)).to.equal(parseEther("9850")); // Above + 2 blocks @100 + 1block @250
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("0")); // 0 blocks * 250
+            });
+
+            it('should allow emergency withdraw', async () => {
+                await advanceBlockTo(startPhase3Block + 100);
+                expect(await LP1.balanceOf(alice.address)).to.equal(900);
+                expect(await LP2.balanceOf(bob.address)).to.equal(800);
+
+                // All phases are over and tokens split evenly but not yet claimed
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                // 148blocks * 250 = 37k
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("37000"));
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("37000"));
+
+                // Now A withdraws and B emergency withdraws. Spot the difference.
+                await expect(perfumer.connect(alice).withdraw(0, 100)).to.emit(perfumer, "Withdraw");
+                await expect(perfumer.connect(bob).emergencyWithdraw(1)).to.emit(perfumer, "EmergencyWithdraw");
+
+                // A reaps full rewards but B gets none. Both get LP tokens back. Neither are owed any more reward.
+                expect(await cologne.balanceOf(alice.address)).to.equal(parseEther("37000"));
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+                expect(await LP1.balanceOf(alice.address)).to.equal(1000);
+                expect(await LP2.balanceOf(bob.address)).to.equal(1000);
+            });
         });
 
-        it.skip('should not distribute CLGNs if no one deposit', async () => {
-            //TODO
-        });
+        context('With different pool weights (Alice and Bob start with a pool to themselves)', () => {
+            beforeEach(async () => {
+                // LP Token 1: a staking 1000
+                // LP Token 2: b staking 1
+                // Expect B to take 80% because LP2 is worth 80% of weight
+                await perfumer.add('10', LP1.address, true);
+                await perfumer.add('40', LP2.address, true);
+                await perfumer.connect(alice).deposit(0, 1000);
+                await perfumer.connect(bob).deposit(1, 10);
+            });
 
-        it.skip('should allow emergency withdraw', async () => {
-            //TODO
+            it('should start with correct balances and totalSupplies', async () => {
+                expect(await LP1.balanceOf(alice.address)).to.equal(0);
+                expect(await LP2.balanceOf(bob.address)).to.equal(990);
+                expect(await LP1.balanceOf(perfumer.address)).to.equal(1000);
+                expect(await LP2.balanceOf(perfumer.address)).to.equal(10);
+            });
+
+            it('should reward all stakers in proportion to pool weight when only one staker per', async () => {
+                // Start at 0
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+
+                await advanceBlockTo(startPhase1Block);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+
+                await advanceBlockTo(startPhase1Block + 1);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("100"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("400"));
+
+                await advanceBlockTo(startPhase1Block + 46);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("4600")); // 46 * 100
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("18400")); // 46 * 400
+
+                await advanceBlockTo(startPhase3Block + 60);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("14800")); // 148 * 100
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("59200")); // 148 * 400
+            });
+
+            it('should reward all stakers appropriately when stakes and pool weights change', async () => {
+                // Start at 0
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+
+                await advanceBlockTo(startPhase1Block);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+
+                await advanceBlockTo(startPhase1Block + 1);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("100"));
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("400"));
+
+                // Now A deposits 4 of LP Token 2, taking 75% of LP2's allocation for the next 44 blocks
+                // (This takes a block to kick in in the BEVM, so the previous allocation counts for two blocks, not just one.)
+                await perfumer.connect(alice).deposit(1, 30);
+                await advanceBlockTo(startPhase1Block + 3);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("300")); // 100*3blocks
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("300")); // 300*1block
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("900")); // 400*2blocs + 100 * 1block
+
+                await advanceBlockTo(startPhase1Block + 46);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("4600")); // 46 * 100
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("13200")); // 44 * 300
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("5200")); // 800 + 44 * 100
+
+                // Values unchanged at next block because no phase active
+                await advanceBlockTo(startPhase1Block + 47);
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("4600")); // 46 * 100
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("13200")); // 44 * 300
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("5200")); // 800 + 44 * 100
+
+                // Now pool weights are changed (relative weights are reversed)
+                // Fast forward 46 + 56 = 102 reward blocks
+                await perfumer.set(0, 4, true);
+                await perfumer.set(1, 1, true);
+                await advanceBlockTo(startPhase3Block + 100);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("45400")); // As above + 102 * 400
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("20850")); // As above + 102 * 75
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("7750")); // As above + 102 * 25
+
+            });
+
+            it('should allow emergency withdraw', async () => {
+                await advanceBlockTo(startPhase3Block + 100);
+                expect(await LP1.balanceOf(alice.address)).to.equal(0);
+                expect(await LP2.balanceOf(bob.address)).to.equal(990);
+
+                // All phases are over and tokens split evenly but not yet claimed
+                expect(await cologne.balanceOf(alice.address)).to.equal(0);
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                // 148blocks * 250 = 37k
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(parseEther("14800"));
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(parseEther("0"));
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(parseEther("59200"));
+
+                // Now A withdraws and B emergency withdraws. Spot the difference.
+                await expect(perfumer.connect(alice).withdraw(0, 1000)).to.emit(perfumer, "Withdraw");
+                await expect(perfumer.connect(bob).emergencyWithdraw(1)).to.emit(perfumer, "EmergencyWithdraw");
+
+                // A reaps full rewards but B gets none. Both get LP tokens back. Neither are owed any more reward.
+                expect(await cologne.balanceOf(alice.address)).to.equal(parseEther("14800"));
+                expect(await cologne.balanceOf(bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, alice.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(0, bob.address)).to.equal(0);
+                expect(await perfumer.pendingCologne(1, bob.address)).to.equal(0);
+                expect(await LP1.balanceOf(alice.address)).to.equal(1000);
+                expect(await LP2.balanceOf(bob.address)).to.equal(1000);
+            });
         });
-        
     });
 });
