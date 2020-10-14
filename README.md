@@ -26,17 +26,18 @@ Run `yarn` from this root directory to install dependencies.
 ## Deploying locally
 
  - Verify/update all of the constants configured in `scripts/deploy.ts`
- - `yarn deploy-local`
-
-This will deploy to the default network defined in `buidler.config.ts`.
+ - Run a local node (e.g. `npx buidler node`) in another terminal window or in the background
+ - `yarn deploy:local`
 
 ## Deploying to Görli testnet
 
-TODO
+ - Verify/update all of the constants configured in `scripts/deploy.ts`
+ - `yarn deploy:goerli`
 
 ## Deploying to Ethereum's mainnet
 
-TODO
+ - Verify/update all of the constants configured in `scripts/deploy.ts`
+ - `yarn deploy:mainnet`
 
 ## Adding to / updating the list of supported (LP) tokens
 
